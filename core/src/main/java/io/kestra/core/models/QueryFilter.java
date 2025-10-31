@@ -180,6 +180,12 @@ public record QueryFilter(
             public List<Op> supportedOp() {
                 return List.of(Op.EQUALS, Op.NOT_EQUALS);
             }
+        },
+        PARENT_PATH("parentPath") {
+            @Override
+            public List<Op> supportedOp() {
+                return List.of(Op.EQUALS, Op.NOT_EQUALS);
+            }
         };
 
         private static final Map<String, Field> BY_VALUE = Arrays.stream(values())
@@ -271,6 +277,17 @@ public record QueryFilter(
             public List<Field> supportedField() {
                 return List.of(
                     Field.QUERY,
+                    Field.NAMESPACE,
+                    Field.UPDATED
+                );
+            }
+        },
+        NAMESPACE_FILE_METADATA {
+            @Override
+            public List<Field> supportedField() {
+                return List.of(
+                    Field.QUERY,
+                    Field.PARENT_PATH,
                     Field.NAMESPACE,
                     Field.UPDATED
                 );
