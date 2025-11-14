@@ -17,6 +17,7 @@ import io.kestra.core.models.flows.FlowScope;
 import io.kestra.core.models.flows.State;
 import io.kestra.core.queues.QueueFactoryInterface;
 import io.kestra.core.queues.QueueInterface;
+import io.kestra.core.queues.QueueService;
 import io.kestra.core.repositories.ArrayListTotal;
 import io.kestra.core.repositories.ExecutionRepositoryInterface;
 import io.kestra.core.runners.Executor;
@@ -57,14 +58,13 @@ import java.util.stream.Stream;
 
 import static io.kestra.core.models.QueryFilter.Field.KIND;
 
-public abstract class AbstractJdbcExecutionRepository extends AbstractJdbcRepository implements ExecutionRepositoryInterface, JdbcQueueIndexerInterface<Execution> {
+public abstract class AbstractJdbcExecutionRepository extends AbstractJdbcCrudRepository<Execution> implements ExecutionRepositoryInterface, JdbcQueueIndexerInterface<Execution> {
     private static final int FETCH_SIZE = 100;
     private static final Field<String> STATE_CURRENT_FIELD = field("state_current", String.class);
     private static final Field<String> NAMESPACE_FIELD = field("namespace", String.class);
     private static final Field<Object> START_DATE_FIELD = field("start_date");
     private static final Condition NORMAL_KIND_CONDITION = field("kind").isNull();
 
-    protected final io.kestra.jdbc.AbstractJdbcRepository<Execution> jdbcRepository;
     private final ApplicationEventPublisher<CrudEvent<Execution>> eventPublisher;
     private final ApplicationContext applicationContext;
     protected final AbstractJdbcExecutorStateStorage executorStateStorage;
@@ -100,11 +100,12 @@ public abstract class AbstractJdbcExecutionRepository extends AbstractJdbcReposi
     @SuppressWarnings("unchecked")
     public AbstractJdbcExecutionRepository(
         io.kestra.jdbc.AbstractJdbcRepository<Execution> jdbcRepository,
+        QueueService queueService,
         ApplicationContext applicationContext,
         AbstractJdbcExecutorStateStorage executorStateStorage,
         JdbcFilterService filterService
     ) {
-        this.jdbcRepository = jdbcRepository;
+        super(jdbcRepository, queueService);
         this.executorStateStorage = executorStateStorage;
         this.eventPublisher = applicationContext.getBean(ApplicationEventPublisher.class);
         this.namespaceUtils = applicationContext.getBean(NamespaceUtils.class);
@@ -198,6 +199,7 @@ public abstract class AbstractJdbcExecutionRepository extends AbstractJdbcReposi
             });
     }
 
+
     abstract protected Condition findCondition(String query, Map<String, String> labels);
 
     protected Condition findQueryCondition(String query) {
@@ -218,20 +220,7 @@ public abstract class AbstractJdbcExecutionRepository extends AbstractJdbcReposi
         @Nullable List<QueryFilter> filters
 
     ) {
-        return this.jdbcRepository
-            .getDslContextWrapper()
-            .transactionResult(configuration -> {
-                DSLContext context = DSL.using(configuration);
-
-                SelectConditionStep<Record1<Object>> select = this.findSelect(
-                    context,
-                    tenantId,
-                    filters
-
-                );
-
-                return this.jdbcRepository.fetchPage(context, select, pageable);
-            });
+        return findPage(pageable, tenantId, this.computeFindCondition(filters));
     }
 
     @Override
@@ -283,27 +272,11 @@ public abstract class AbstractJdbcExecutionRepository extends AbstractJdbcReposi
         );
     }
 
-    private SelectConditionStep<Record1<Object>> findSelect(
-        DSLContext context,
-        @Nullable String tenantId,
-        @Nullable List<QueryFilter> filters
-    ) {
-
-        SelectConditionStep<Record1<Object>> select = context
-            .select(
-                field("value")
-            )
-            .from(this.jdbcRepository.getTable())
-            .where(this.defaultFilter(tenantId, false));
-
+    private Condition computeFindCondition(@Nullable List<QueryFilter> filters) {
         boolean hasKindFilter = filters != null && filters.stream()
             .anyMatch(f -> KIND.value().equalsIgnoreCase(f.field().name()) );
-        if (!hasKindFilter) {
-            select = select.and(NORMAL_KIND_CONDITION);
-        }
-        select = select.and(this.filter(filters, "start_date", Resource.EXECUTION));
-
-        return select;
+        return hasKindFilter ?  this.filter(filters, "start_date", Resource.EXECUTION) :
+            this.filter(filters, "start_date", Resource.EXECUTION).and(NORMAL_KIND_CONDITION);
     }
 
     private SelectConditionStep<Record1<Object>> findSelect(
@@ -346,42 +319,9 @@ public abstract class AbstractJdbcExecutionRepository extends AbstractJdbcReposi
     }
 
     @Override
-    public Flux<Execution> findAllAsync(@Nullable String tenantId) {
-        return Flux.create(emitter -> this.jdbcRepository
-            .getDslContextWrapper()
-            .transaction(configuration -> {
-                DSLContext context = DSL.using(configuration);
-
-                SelectConditionStep<Record1<Object>> select = context
-                    .select(field("value"))
-                    .from(this.jdbcRepository.getTable())
-                    .where(this.defaultFilter(tenantId));
-
-                try (Stream<Record1<Object>> stream = select.fetchSize(FETCH_SIZE).stream()) {
-                    stream.map((Record record) -> jdbcRepository.map(record))
-                        .forEach(emitter::next);
-                } finally {
-                    emitter.complete();
-                }
-            }), FluxSink.OverflowStrategy.BUFFER);
-    }
-
-    @Override
     public ArrayListTotal<Execution> findByFlowId(String tenantId, String namespace, String id, Pageable pageable) {
-        return this.jdbcRepository
-            .getDslContextWrapper()
-            .transactionResult(configuration -> {
-                DSLContext context = DSL.using(configuration);
-
-                SelectConditionStep<Record1<Object>> select = context
-                    .select(field("value"))
-                    .from(this.jdbcRepository.getTable())
-                    .where(this.defaultFilter(tenantId))
-                    .and(field("namespace").eq(namespace))
-                    .and(field("flow_id").eq(id));
-
-                return this.jdbcRepository.fetchPage(context, select, pageable);
-            });
+        var condition = field("namespace").eq(namespace).and(field("flow_id").eq(id));
+        return findPage(pageable, tenantId, condition);
     }
 
     @Override
@@ -889,47 +829,6 @@ public abstract class AbstractJdbcExecutionRepository extends AbstractJdbcReposi
                     .from(cte)
                     .where(field("row_num").eq(1));
                 return mainQuery.fetch().map(this.jdbcRepository::map);
-            });
-    }
-
-
-    @Override
-    public Execution save(Execution execution) {
-        Map<Field<Object>, Object> fields = this.jdbcRepository.persistFields(execution);
-        this.jdbcRepository.persist(execution, fields);
-
-        return execution;
-    }
-
-    @Override
-    public Execution save(DSLContext dslContext, Execution execution) {
-        Map<Field<Object>, Object> fields = this.jdbcRepository.persistFields(execution);
-        this.jdbcRepository.persist(execution, dslContext, fields);
-
-        return execution;
-    }
-
-    @Override
-    public int saveBatch(List<Execution> items) {
-        if (ListUtils.isEmpty(items)) {
-            return 0;
-        }
-
-        return this.jdbcRepository.persistBatch(items);
-    }
-
-    @Override
-    public Execution update(Execution execution) {
-        return this.jdbcRepository
-            .getDslContextWrapper()
-            .transactionResult(configuration -> {
-                DSL.using(configuration)
-                    .update(this.jdbcRepository.getTable())
-                    .set(this.jdbcRepository.persistFields((execution)))
-                    .where(field("key").eq(execution.getId()))
-                    .execute();
-
-                return execution;
             });
     }
 

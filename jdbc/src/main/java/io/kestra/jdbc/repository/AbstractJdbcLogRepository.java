@@ -8,6 +8,7 @@ import io.kestra.core.models.dashboards.DataFilterKPI;
 import io.kestra.core.models.dashboards.filters.AbstractFilter;
 import io.kestra.core.models.executions.Execution;
 import io.kestra.core.models.executions.LogEntry;
+import io.kestra.core.queues.QueueService;
 import io.kestra.core.repositories.ArrayListTotal;
 import io.kestra.core.repositories.LogRepositoryInterface;
 import io.kestra.core.utils.DateUtils;
@@ -29,15 +30,15 @@ import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-public abstract class AbstractJdbcLogRepository extends AbstractJdbcRepository implements LogRepositoryInterface {
+public abstract class AbstractJdbcLogRepository extends AbstractJdbcCrudRepository<LogEntry> implements LogRepositoryInterface {
 
     private static final Condition NORMAL_KIND_CONDITION = field("execution_kind").isNull();
-    public static final String DATE_COLUMN = "timestamp";
-    protected io.kestra.jdbc.AbstractJdbcRepository<LogEntry> jdbcRepository;
+    private static final String DATE_COLUMN = "timestamp";
 
     public AbstractJdbcLogRepository(io.kestra.jdbc.AbstractJdbcRepository<LogEntry> jdbcRepository,
+                                     QueueService queueService,
                                      JdbcFilterService filterService) {
-        this.jdbcRepository = jdbcRepository;
+        super(jdbcRepository, queueService);
 
         this.filterService = filterService;
     }
@@ -86,21 +87,8 @@ public abstract class AbstractJdbcLogRepository extends AbstractJdbcRepository i
         @Nullable String tenantId,
         @Nullable List<QueryFilter> filters
     ) {
-        return this.jdbcRepository
-            .getDslContextWrapper()
-            .transactionResult(configuration -> {
-                DSLContext context = DSL.using(configuration);
-
-                SelectConditionStep<Record1<Object>> select = context
-                    .select(field("value"))
-                    .from(this.jdbcRepository.getTable())
-                    .where(this.defaultFilter(tenantId))
-                    .and(NORMAL_KIND_CONDITION);
-
-               select = select.and(this.filter(filters, DATE_COLUMN, Resource.LOG));
-
-                return this.jdbcRepository.fetchPage(context, select, pageable);
-            });
+        var condition = NORMAL_KIND_CONDITION.and(this.filter(filters, DATE_COLUMN, Resource.LOG));
+        return findPage(pageable, tenantId, condition);
     }
 
     @Override
@@ -121,27 +109,6 @@ public abstract class AbstractJdbcLogRepository extends AbstractJdbcRepository i
 
                 select = select.and(this.filter(filters, DATE_COLUMN, Resource.LOG));
                 select.orderBy(field(DATE_COLUMN).asc());
-
-                try (Stream<Record1<Object>> stream = select.fetchSize(FETCH_SIZE).stream()){
-                    stream.map((Record record) -> jdbcRepository.map(record))
-                        .forEach(emitter::next);
-                } finally {
-                    emitter.complete();
-                }
-            }), FluxSink.OverflowStrategy.BUFFER);
-    }
-
-    @Override
-    public Flux<LogEntry> findAllAsync(@Nullable String tenantId) {
-        return Flux.create(emitter -> this.jdbcRepository
-            .getDslContextWrapper()
-            .transaction(configuration -> {
-                DSLContext context = DSL.using(configuration);
-
-                SelectConditionStep<Record1<Object>> select = context
-                    .select(field("value"))
-                    .from(this.jdbcRepository.getTable())
-                    .where(this.defaultFilter(tenantId));
 
                 try (Stream<Record1<Object>> stream = select.fetchSize(FETCH_SIZE).stream()){
                     stream.map((Record record) -> jdbcRepository.map(record))
@@ -303,23 +270,6 @@ public abstract class AbstractJdbcLogRepository extends AbstractJdbcRepository i
     }
 
     @Override
-    public LogEntry save(LogEntry log) {
-        Map<Field<Object>, Object> fields = this.jdbcRepository.persistFields(log);
-        this.jdbcRepository.persist(log, fields);
-
-        return log;
-    }
-
-    @Override
-    public int saveBatch(List<LogEntry> items) {
-        if (ListUtils.isEmpty(items)) {
-            return 0;
-        }
-
-        return this.jdbcRepository.persistBatch(items);
-    }
-
-    @Override
     public Integer purge(Execution execution) {
         return this.jdbcRepository
             .getDslContextWrapper()
@@ -457,25 +407,8 @@ public abstract class AbstractJdbcLogRepository extends AbstractJdbcRepository i
     }
 
     private ArrayListTotal<LogEntry> query(String tenantId, Condition condition, Level minLevel, Pageable pageable) {
-        return this.jdbcRepository
-            .getDslContextWrapper()
-            .transactionResult(configuration -> {
-                DSLContext context = DSL.using(configuration);
-
-                SelectConditionStep<Record1<Object>> select = context
-                    .select(field("value"))
-                    .from(this.jdbcRepository.getTable())
-                    .where(this.defaultFilter(tenantId));
-
-                select = select.and(condition);
-
-                if (minLevel != null) {
-                    select = select.and(minLevel(minLevel));
-                }
-
-                return this.jdbcRepository.fetchPage(context, select, pageable
-                );
-            });
+        var theCondition = minLevel != null ? condition.and(minLevel(minLevel)) : condition;
+        return findPage(pageable, tenantId, theCondition);
     }
 
     private List<LogEntry> query(String tenantId, Condition condition, Level minLevel, boolean withAccessControl) {

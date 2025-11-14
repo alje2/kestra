@@ -3,6 +3,7 @@ package io.kestra.repository.postgres;
 import io.kestra.core.models.dashboards.filters.AbstractFilter;
 import io.kestra.core.models.dashboards.filters.In;
 import io.kestra.core.models.executions.LogEntry;
+import io.kestra.core.queues.QueueService;
 import io.kestra.core.utils.DateUtils;
 import io.kestra.core.utils.ListUtils;
 import io.kestra.jdbc.repository.AbstractJdbcLogRepository;
@@ -31,8 +32,9 @@ public class PostgresLogRepository extends AbstractJdbcLogRepository {
     private final JdbcFilterService filterService;
     @Inject
     public PostgresLogRepository(@Named("logs") PostgresRepository<LogEntry> repository,
+                                 QueueService queueService,
                                  JdbcFilterService filterService) {
-        super(repository, filterService);
+        super(repository, queueService, filterService);
 
         this.filterService = filterService;
     }
